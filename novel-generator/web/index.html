@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Novel Generator</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+        .section { margin-bottom: 30px; border: 1px solid #ddd; padding: 20px; border-radius: 8px; }
+        .hidden { display: none; }
+        textarea { width: 100%; height: 150px; margin-top: 10px; }
+        input[type="text"] { width: 100%; padding: 8px; margin-top: 5px; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+        button:disabled { background-color: #ccc; }
+        button.secondary { background-color: #6c757d; }
+        button.success { background-color: #28a745; }
+        .chapter-item { border-bottom: 1px solid #eee; padding: 10px 0; }
+        .chapter-status { font-weight: bold; margin-left: 10px; }
+        .status-pending { color: gray; }
+        .status-generating { color: orange; }
+        .status-done { color: green; }
+        .status-error { color: red; }
+        #log { background: #f5f5f5; padding: 10px; height: 200px; overflow-y: scroll; font-family: monospace; }
+        .upload-controls { margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>AI Novel Generator (Local Ollama)</h1>
+
+    <div id="step1" class="section">
+        <h2>1. Basic Info</h2>
+        <label>Title:</label>
+        <input type="text" id="title" placeholder="Enter novel title">
+        <label>Intro:</label>
+        <textarea id="intro" placeholder="Enter novel introduction/premise"></textarea>
+        <button onclick="generateOutline()">Generate Outline</button>
+    </div>
+
+    <div id="step2" class="section hidden">
+        <h2>2. Outline</h2>
+        <p>Review and edit the outline below:</p>
+        <textarea id="outline"></textarea>
+        <button onclick="generateChapters()">Generate Chapters</button>
+    </div>
+
+    <div id="step3" class="section hidden">
+        <h2>3. Chapters</h2>
+        <p>Review and edit chapter summaries. The AI will write based on these.</p>
+        <div id="chapter-list"></div>
+        <button onclick="startWriting()">Start Writing Novel</button>
+    </div>
+
+    <div id="step4" class="section hidden">
+        <h2>4. Writing Progress</h2>
+        
+        <div class="upload-controls">
+            <label>Fanqie Writer URL (Chapter Manage Page):</label>
+            <input type="text" id="fanqie-url" placeholder="https://fanqienovel.com/main/writer/chapter-manage/..." value="">
+            <small>Ensure Chrome is running with <code>--remote-debugging-port=9222</code> and you are logged in.</small>
+        </div>
+
+        <div id="progress-list"></div>
+        
+        <div id="log"></div>
+        <button onclick="window.location.href='/api/download'">Download Novel</button>
+    </div>
+
+    <script>
+        let currentChapters = [];
+
+        async function generateOutline() {
+            const title = document.getElementById('title').value;
+            const intro = document.getElementById('intro').value;
+            if (!title || !intro) return alert('Please enter title and intro');
+
+            const btn = document.querySelector('#step1 button');
+            btn.disabled = true;
+            btn.innerText = 'Generating...';
+
+            try {
+                const res = await fetch('/api/outline', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({title, intro})
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+                
+                document.getElementById('outline').value = data.outline;
+                document.getElementById('step2').classList.remove('hidden');
+            } catch (e) {
+                alert('Error: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'Generate Outline';
+            }
+        }
+
+        async function generateChapters() {
+            const outline = document.getElementById('outline').value;
+            const btn = document.querySelector('#step2 button');
+            btn.disabled = true;
+            btn.innerText = 'Generating Chapters...';
+
+            try {
+                const res = await fetch('/api/chapters', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({outline})
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                currentChapters = data.chapters;
+                renderChapters();
+                document.getElementById('step3').classList.remove('hidden');
+            } catch (e) {
+                alert('Error: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'Generate Chapters';
+            }
+        }
+
+        function renderChapters() {
+            const list = document.getElementById('chapter-list');
+            list.innerHTML = '';
+            currentChapters.forEach((ch, index) => {
+                const div = document.createElement('div');
+                div.className = 'chapter-item';
+                div.innerHTML = `
+                    <strong>Chapter ${ch.id}</strong>
+                    <input type="text" value="${ch.title}" onchange="updateChapter(${index}, 'title', this.value)">
+                    <textarea onchange="updateChapter(${index}, 'summary', this.value)">${ch.summary}</textarea>
+                `;
+                list.appendChild(div);
+            });
+        }
+
+        function updateChapter(index, field, value) {
+            currentChapters[index][field] = value;
+        }
+
+        async function startWriting() {
+            document.getElementById('step4').classList.remove('hidden');
+            const progressList = document.getElementById('progress-list');
+            const logDiv = document.getElementById('log');
+            progressList.innerHTML = ''; // Clear previous run if any
+            
+            // Render progress items
+            currentChapters.forEach(ch => {
+                const div = document.createElement('div');
+                div.className = 'chapter-item';
+                div.id = `prog-item-${ch.id}`;
+                div.innerHTML = `
+                    <strong>Chapter ${ch.id}: ${ch.title}</strong>
+                    <span id="status-${ch.id}" class="chapter-status status-pending">Pending</span>
+                    <button id="upload-btn-${ch.id}" class="secondary" onclick="uploadChapter(${ch.id})" style="display:none; font-size: 0.8em; padding: 5px 10px;">Upload to Fanqie</button>
+                `;
+                progressList.appendChild(div);
+            });
+
+            let prevSummary = "无";
+            
+            for (const ch of currentChapters) {
+                const statusSpan = document.getElementById(`status-${ch.id}`);
+                statusSpan.className = 'chapter-status status-generating';
+                statusSpan.innerText = 'Writing...';
+                
+                // logDiv.innerHTML += `<div>Writing Chapter ${ch.id}: ${ch.title}...</div>`;
+                // logDiv.scrollTop = logDiv.scrollHeight;
+
+                try {
+                    const res = await fetch('/api/chapter/content', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            chapter: ch,
+                            prev_summary: prevSummary
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+                    
+                    // Update content in our local array
+                    ch.content = data.content;
+                    
+                    statusSpan.className = 'chapter-status status-done';
+                    statusSpan.innerText = 'Done';
+                    document.getElementById(`upload-btn-${ch.id}`).style.display = 'inline-block';
+                    
+                    // Update prevSummary for next chapter
+                    prevSummary = ch.summary; 
+                    
+                } catch (e) {
+                    statusSpan.className = 'chapter-status status-error';
+                    statusSpan.innerText = 'Error';
+                    logDiv.innerHTML += `<div style="color:red">Error writing chapter ${ch.id}: ${e.message}</div>`;
+                }
+            }
+            
+            logDiv.innerHTML += `<div><strong>All Done! You can download now.</strong></div>`;
+        }
+
+        async function uploadChapter(chapterId) {
+            const url = document.getElementById('fanqie-url').value;
+            if (!url) return alert('Please enter Fanqie Writer URL');
+
+            const chapter = currentChapters.find(c => c.id === chapterId);
+            if (!chapter || !chapter.content) return alert('Chapter content not found');
+
+            const btn = document.getElementById(`upload-btn-${chapterId}`);
+            const originalText = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = 'Uploading...';
+
+            try {
+                const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        url: url,
+                        title: chapter.title,
+                        content: chapter.content
+                    })
+                });
+                
+                if (res.ok) {
+                    btn.className = 'success';
+                    btn.innerText = 'Uploaded';
+                } else {
+                    const txt = await res.text();
+                    throw new Error(txt);
+                }
+            } catch (e) {
+                alert('Upload failed: ' + e.message);
+                btn.disabled = false;
+                btn.innerText = originalText;
+            }
+        }
+    </script>
+</body>
+</html>
